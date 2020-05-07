@@ -1,0 +1,194 @@
+---
+title: "CASCADE HER2 CAS0057 DGE"
+author: "Thomas Conway"
+date: "2020-05-05"
+output:
+  html_document:
+    toc: true
+  pdf_document:
+    keep_tex: true
+---
+
+# CAS0057 WTS DGE
+
+The CASCADE project is a study across several cancer types, in which
+in addition to any samples taken at diagnosis and during treatment,
+at death, a rapid autopsy is performed to sample metastatic leisions
+that may not be accessable otherwise. Among the various assays used, are
+whole genome sequencing (WGS), and whole transcriptome sequencing (WTS).
+
+Here we present the differential gene expression (DGE) analysis of the
+4 metastatic sites sampled from patient CAS0057, who was diagnosed with
+HER2+ breast cancer.
+
+## Preamble
+
+```{r, echo=FALSE}
+library(data.table)
+library(ggplot2)
+library(scales)
+
+library(EnsDb.Hsapiens.v75)
+
+gene.names <- select(EnsDb.Hsapiens.v75, keys=keys(EnsDb.Hsapiens.v75, keytype="GENEID"), keytype="GENEID", columns=c("GENEID", "GENENAME"))
+gene.names <- data.table(ensembl.id = gene.names$GENEID, name = gene.names$GENENAME)
+setkey(gene.names, 'ensembl.id')
+
+pam50.genes <- c("UBE2T", "BIRC5", "NUF2", "CDC6", "CCNB1",
+                 "TYMS", "MYBL2", "CEP55", "MELK", "NDC80",
+                 "RRM2", "UBE2C", "CENPF", "PTTG1", "EXO1",
+                 "ORC6L", "ANLN", "CCNE1", "CDC20", "MKI67",
+                 "KIF2C", "ACTR3B", "MYC", "EGFR", "KRT5",
+                 "PHGDH", "CDH3", "MIA", "KRT17", "FOXC1",
+                 "SFRP1", "KRT14", "ESR1", "SLC39A6", "BAG1",
+                 "MAPT", "PGR", "CXXC5", "MLPH", "BCL2",
+                 "MDM2", "NAT1", "FOXA1", "BLVRA", "MMP11",
+                 "GPR160", "FGFR4", "GRB7", "TMEM45B", "ERBB2")
+
+samples.summary <- fread('data/summary.tsv', header=T)
+
+add.summary <- function(nm, dt) {
+    samples.summary[WTS==nm, fragments := dt[, sum(count)]]
+    samples.summary[WTS==nm, no.feature := dt[ensembl.id=="__no_feature", sum(count)]]
+    samples.summary[WTS==nm, ambiguous := dt[ensembl.id=="__ambiguous", sum(count)]]
+    samples.summary[WTS==nm, non.unique := dt[ensembl.id=="__alignment_not_unique", sum(count)]]
+    samples.summary[WTS==nm, good.count := (fragments - no.feature - ambiguous - non.unique)]
+    samples.summary[WTS==nm, good.fraction := good.count / fragments]
+}
+
+htseq.count.columns <- c('ensembl.id', 'count')
+PRJ190532.all <- fread('data/PRJ190532_CAS0057_3-counts.tsv', col.names=htseq.count.columns)
+add.summary('PRJ190532', PRJ190532.all)
+PRJ190532 <- PRJ190532.all[grepl('^ENS', ensembl.id)]
+PRJ190532.meta <- PRJ190532.all[grepl('^_', ensembl.id)]
+setkey(PRJ190532, 'ensembl.id')
+PRJ190532 <- merge(PRJ190532, gene.names, all.x = TRUE)
+PRJ190532[, fpm := 1e6*count/sum(count)]
+
+PRJ190533.all = fread('data/PRJ190533_CAS0057_4-counts.tsv', col.names=htseq.count.columns)
+add.summary('PRJ190533', PRJ190533.all)
+PRJ190533 <- PRJ190533.all[grepl('^ENS', ensembl.id)]
+PRJ190533.meta <- PRJ190533.all[grepl('^_', ensembl.id)]
+setkey(PRJ190533, 'ensembl.id')
+PRJ190533 <- merge(PRJ190533, gene.names, all.x = TRUE)
+PRJ190533[, fpm := 1e6*count/sum(count)]
+
+PRJ190534.all = fread('data/PRJ190534_CAS0057_5-counts.tsv', col.names=htseq.count.columns)
+add.summary('PRJ190534', PRJ190534.all)
+PRJ190534 <- PRJ190534.all[grepl('^ENS', ensembl.id)]
+PRJ190534.meta <- PRJ190534.all[grepl('^_', ensembl.id)]
+setkey(PRJ190534, 'ensembl.id')
+PRJ190534 <- merge(PRJ190534, gene.names, all.x = TRUE)
+PRJ190534[, fpm := 1e6*count/sum(count)]
+
+PRJ190535.all = fread('data/PRJ190535_CAS0057_6-counts.tsv', col.names=htseq.count.columns)
+add.summary('PRJ190535', PRJ190535.all)
+PRJ190535 <- PRJ190535.all[grepl('^ENS', ensembl.id)]
+PRJ190535.meta <- PRJ190535.all[grepl('^_', ensembl.id)]
+setkey(PRJ190535, 'ensembl.id')
+PRJ190535 <- merge(PRJ190535, gene.names, all.x = TRUE)
+PRJ190535[, fpm := 1e6*count/sum(count)]
+
+big.table <- data.table(ensembl.id = PRJ190532[, ensembl.id],
+                        name=PRJ190532[, name],
+                        PRJ190532=PRJ190532[, fpm],
+                        PRJ190533=PRJ190533[, fpm],
+                        PRJ190534=PRJ190534[, fpm],
+                        PRJ190535=PRJ190535[, fpm])
+
+long.table <- melt(big.table, id.vars=c('ensembl.id', 'name'))[, .(ensembl.id, name, sample = variable, fpm = value)]
+```
+
+## Data Summary
+
+Whole transcriptome sequencing was performed on 4 samples.
+
+```{r echo=FALSE}
+knitr::kable(samples.summary[, .(Patient, Sample, WTS, Site)], longtable=FALSE)
+```
+
+```{r echo=FALSE}
+knitr::kable(samples.summary[, .(WTS,
+                                 fragments = label_comma()(fragments),
+                                 good.count = label_comma()(good.count),
+                                 good =  label_percent()(good.fraction),
+                                 no.feature = label_percent()(no.feature/fragments),
+                                 non.unique = label_percent()(non.unique/fragments),
+                                 ambiguous = label_percent()(ambiguous/fragments))],
+             longtable=FALSE)
+```
+
+TODO: Add a summary table with number of reads and data quality
+
+## Alignment Results
+
+After aligning with STAR against hg19, with Homo\_sapiens.GRCh37.87.gtf
+as the annotation, and counting reads with `htseq-count` the following
+expression profiles were obtained (expressed as fragments per million - fpm):
+
+
+```{r, echo=FALSE}
+epdt <- long.table[fpm > 1.0]
+setkey(epdt, 'fpm')
+epdt[, fpm.rank := (1:length(fpm))/length(fpm), by='sample']
+ggplot(epdt, aes(fpm.rank, fpm, group=sample, colour=sample)) +
+            geom_line() +
+            scale_y_log10() +
+            labs(x='fpm rank', y='fpm (log scale)', colour='Sample') +
+            theme_minimal()
+```
+
+## Highly Expressed Genes
+
+There are a small number of genes with large counts.
+
+```{r, echo=FALSE}
+# Pull out the list of most highly expressed genes
+#
+high.genes = long.table[fpm > 2000, unique(name)]
+
+# Use them to extract a subset of the data
+#
+hgdt <- long.table[name %in% high.genes]
+
+# Order them by mean fpm.
+#
+hg.order <- hgdt[, .(fpm.mean = sum(fpm)/length(fpm)), by='name']
+setkey(hg.order, 'fpm.mean')
+hgdt[, name := factor(name, levels=hg.order$name)]
+
+ggplot(hgdt, aes(name, fpm, colour=sample)) +
+            geom_point() +
+            scale_y_log10() +
+            labs(x='gene', y='fpm', colour='Sample') +
+            theme_minimal() +
+            theme(axis.text.x = element_text(angle = -90, hjust = 1))
+```
+
+```{r, echo=FALSE}
+make.big.table <- function(nm, dt) {
+    tbl.big <- dt[fpm > 4000]
+    tbl.big[name %in% pam50.genes, name := paste0("**", name, "**")]
+    setkey(tbl.big, 'fpm')
+    return(knitr::kable(tbl.big[, .(ensembl.id, name, count = label_comma()(count), fpm)],
+                        caption=sprintf("Genes with large read counts in %s", nm),
+                        longtable=FALSE))
+}
+```
+
+```{r, echo=FALSE}
+#make.big.table("PRJ190532", PRJ190532)
+```
+
+```{r, echo=FALSE}
+#make.big.table("PRJ190533", PRJ190533)
+```
+
+```{r, echo=FALSE}
+#make.big.table("PRJ190534", PRJ190534)
+```
+
+```{r, echo=FALSE}
+#make.big.table("PRJ190535", PRJ190535)
+```
+
