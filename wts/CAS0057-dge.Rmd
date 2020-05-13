@@ -29,6 +29,7 @@ library(ggplot2)
 library(scales)
 
 library(EnsDb.Hsapiens.v75)
+library(edgeR)
 
 gene.names <- select(EnsDb.Hsapiens.v75, keys=keys(EnsDb.Hsapiens.v75, keytype="GENEID"), keytype="GENEID", columns=c("GENEID", "GENENAME"))
 gene.names <- data.table(ensembl.id = gene.names$GENEID, name = gene.names$GENENAME)
@@ -97,6 +98,13 @@ big.table <- data.table(ensembl.id = PRJ190532[, ensembl.id],
                         PRJ190535=PRJ190535[, fpm])
 
 long.table <- melt(big.table, id.vars=c('ensembl.id', 'name'))[, .(ensembl.id, name, sample = variable, fpm = value)]
+
+big.counts <- data.table(ensembl.id = PRJ190532[, ensembl.id],
+                        name=PRJ190532[, name],
+                        PRJ190532=PRJ190532[, count],
+                        PRJ190533=PRJ190533[, count],
+                        PRJ190534=PRJ190534[, count],
+                        PRJ190535=PRJ190535[, count])
 ```
 
 ## Data Summary
@@ -127,7 +135,7 @@ as the annotation, and counting reads with `htseq-count` the following
 expression profiles were obtained (expressed as fragments per million - fpm):
 
 
-```{r, echo=FALSE}
+```{r, echo=FALSE, out.width='75%', fig.align='center'}
 epdt <- long.table[fpm > 1.0]
 setkey(epdt, 'fpm')
 epdt[, fpm.rank := (1:length(fpm))/length(fpm), by='sample']
@@ -142,7 +150,7 @@ ggplot(epdt, aes(fpm.rank, fpm, group=sample, colour=sample)) +
 
 There are a small number of genes with large counts.
 
-```{r, echo=FALSE}
+```{r, echo=FALSE, out.width='75%', fig.align='center'}
 # Pull out the list of most highly expressed genes
 #
 high.genes = long.table[fpm > 2000, unique(name)]
@@ -192,3 +200,80 @@ make.big.table <- function(nm, dt) {
 #make.big.table("PRJ190535", PRJ190535)
 ```
 
+## Differential Expression
+
+```{r, echo=FALSE}
+# Assume each sample was in its own lane,
+# and each sample is in a different group.
+#
+sample.lanes = sprintf("L%03d", (1:4))
+sample.groups = sprintf("G%03d", (1:4))
+
+nonzero.counts = big.counts[(PRJ190532 + PRJ190533 + PRJ190534 + PRJ190535) > 0]
+dge.tbl <- DGEList(nonzero.counts[, .(PRJ190532, PRJ190533, PRJ190534, PRJ190535)], genes=nonzero.counts[, name])
+dge.tbl$samples$lanes = sample.lanes
+dge.cpm <- data.table(cpm(dge.tbl))
+dge.lcpm <- data.table(cpm(dge.tbl, log=TRUE))
+L <- mean(dge.tbl$samples$lib.size) * 1e-6
+M <- median(dge.tbl$samples$lib.size) * 1e-6
+```
+
+```{r, echo=FALSE, out.width='75%', fig.align='center'}
+PRJ190532.density <- dge.lcpm[, density(PRJ190532)]
+PRJ190532.density <- data.table(x=PRJ190532.density$x, y=PRJ190532.density$y)
+PRJ190533.density <- dge.lcpm[, density(PRJ190533)]
+PRJ190533.density <- data.table(x=PRJ190533.density$x, y=PRJ190533.density$y)
+PRJ190534.density <- dge.lcpm[, density(PRJ190534)]
+PRJ190534.density <- data.table(x=PRJ190534.density$x, y=PRJ190534.density$y)
+PRJ190535.density <- dge.lcpm[, density(PRJ190535)]
+PRJ190535.density <- data.table(x=PRJ190535.density$x, y=PRJ190535.density$y)
+lcpm.cutoff <- log2(10/M + 2/L)
+ggplot(PRJ190532.density, aes(x, y, colour='PRJ190532')) +
+    geom_line() +
+    geom_line(data=PRJ190533.density, aes(x, y, colour='PRJ190533')) +
+    geom_line(data=PRJ190534.density, aes(x, y, colour='PRJ190534')) +
+    geom_line(data=PRJ190535.density, aes(x, y, colour='PRJ190535')) +
+    labs(x="log cpm", y="density", colour="sample", title="distribution of log cpm before filtering") +
+    theme_minimal()
+```
+
+```{r, echo=FALSE}
+# apply filtering
+#
+keep.exprs <- filterByExpr(dge.tbl, group=sample.groups)
+dge.tbl <- dge.tbl[keep.exprs,, keep.lib.sizes=FALSE]
+dge.lcpm <- data.table(cpm(dge.tbl, log=TRUE))
+```
+
+```{r, echo=FALSE, out.width='75%', fig.align='center'}
+PRJ190532.density <- dge.lcpm[, density(PRJ190532)]
+PRJ190532.density <- data.table(x=PRJ190532.density$x, y=PRJ190532.density$y)
+PRJ190533.density <- dge.lcpm[, density(PRJ190533)]
+PRJ190533.density <- data.table(x=PRJ190533.density$x, y=PRJ190533.density$y)
+PRJ190534.density <- dge.lcpm[, density(PRJ190534)]
+PRJ190534.density <- data.table(x=PRJ190534.density$x, y=PRJ190534.density$y)
+PRJ190535.density <- dge.lcpm[, density(PRJ190535)]
+PRJ190535.density <- data.table(x=PRJ190535.density$x, y=PRJ190535.density$y)
+lcpm.cutoff <- log2(10/M + 2/L)
+ggplot(PRJ190532.density, aes(x, y, colour='PRJ190532')) +
+    geom_line() +
+    geom_line(data=PRJ190533.density, aes(x, y, colour='PRJ190533')) +
+    geom_line(data=PRJ190534.density, aes(x, y, colour='PRJ190534')) +
+    geom_line(data=PRJ190535.density, aes(x, y, colour='PRJ190535')) +
+    labs(x="log cpm", y="density", colour="sample", title="distribution of log cpm after filtering") +
+    theme_minimal()
+```
+
+```{r, echo=FALSE}
+# apply normalisation
+#
+dge.tbl <- calcNormFactors(dge.tbl, method = "TMM")
+dge.lcpm <- cpm(dge.tbl, log=TRUE)
+```
+
+Plotting the MDS analysis of the log cpm values gives a feel for how
+similar to each other the samples are.
+
+```{r, echo=FALSE, out.width='75%', fig.align='center'}
+plotMDS(dge.lcpm)
+```
