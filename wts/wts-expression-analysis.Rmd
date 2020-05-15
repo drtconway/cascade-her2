@@ -2,6 +2,21 @@
 title: "CASCADE HER2 Gene Expression Analysis"
 author: "Thomas Conway"
 date: "2020-05-11"
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{longtable}
+- \usepackage{array}
+- \usepackage{multirow}
+- \usepackage{wrapfig}
+- \usepackage{float}
+- \usepackage{colortbl}
+- \usepackage{pdflscape}
+- \usepackage{tabu}
+- \usepackage{threeparttable}
+- \usepackage{threeparttablex}
+- \usepackage[normalem]{ulem}
+- \usepackage{makecell}
+- \usepackage{xcolor}
 output:
   html_document:
     toc: true
@@ -30,6 +45,7 @@ library(scales)
 
 library(EnsDb.Hsapiens.v75)
 library(edgeR)
+library(kableExtra)
 
 gene.names <- select(EnsDb.Hsapiens.v75, keys=keys(EnsDb.Hsapiens.v75, keytype="GENEID"), keytype="GENEID", columns=c("GENEID", "GENENAME"))
 gene.names <- data.table(ensembl.id = gene.names$GENEID, name = gene.names$GENENAME)
@@ -37,17 +53,11 @@ setkey(gene.names, 'ensembl.id')
 
 commaize <- label_comma()
 percentize <- label_percent()
+boldize <- function(v) { text_spec(v, bold=TRUE) }
+decimalize <- function(v) { sprintf("%2.2f", v) }
 
-pam50.genes <- c("UBE2T", "BIRC5", "NUF2", "CDC6", "CCNB1",
-                 "TYMS", "MYBL2", "CEP55", "MELK", "NDC80",
-                 "RRM2", "UBE2C", "CENPF", "PTTG1", "EXO1",
-                 "ORC6L", "ANLN", "CCNE1", "CDC20", "MKI67",
-                 "KIF2C", "ACTR3B", "MYC", "EGFR", "KRT5",
-                 "PHGDH", "CDH3", "MIA", "KRT17", "FOXC1",
-                 "SFRP1", "KRT14", "ESR1", "SLC39A6", "BAG1",
-                 "MAPT", "PGR", "CXXC5", "MLPH", "BCL2",
-                 "MDM2", "NAT1", "FOXA1", "BLVRA", "MMP11",
-                 "GPR160", "FGFR4", "GRB7", "TMEM45B", "ERBB2")
+pam50.matrix <- fread('pam50_centroids.txt', header=TRUE);
+pam50.long <- melt(pam50.matrix, id.vars='gene')[, .(gene, type = variable, weight = value)]
 
 samples.toc <- fread('data/samples-toc.tsv', header=TRUE)
 samples.toc[WGS.project == "NA",    WGS.project := NA]
@@ -92,7 +102,8 @@ x <- samples.toc
 setkey(x, 'WTS.project')
 x <- merge(x, read.counts, by.x='WTS.project', by.y='project')
 setkeyv(x, c('patient.id', 'sample.id'))
-knitr::kable(x[!is.na(WTS.project), .(patient.id, sample.id, WTS.project, read.count = commaize(read.count), sample.site)], longtable=FALSE)
+knitr::kable(x[!is.na(WTS.project), .(patient.id, sample.id, WTS.project, read.count = commaize(read.count), sample.site)],
+             caption="Data Summary")
 ```
 
 The reader were aligned to hg19 with STAR, using Homo\_sapiens.GRCh37.87.gtf.
@@ -117,7 +128,7 @@ for (pid in unique(alignment.summary$patient.id)) {
           no.feature = percentize(no.feature),
           ambiguous = percentize(ambiguous),
           non.unique = percentize(non.unique)
-        )], caption=pid))
+        )], caption=paste0(pid, " alignment summary")))
 }
 ```
 
@@ -130,10 +141,116 @@ ggplot(counts.long[count > 1], aes(log2(count))) +
     facet_wrap(~patient.id)
 ```
 
+## PAM50 Classification
+
+PAM50 classification was performed using the centroid matrix from
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6547580/ using the lcpm
+values. The usual method was evaluated: using the Spearman's rank
+correlation between the lcpm values and the centroid values.
+
+```{r, echo=FALSE, cache=TRUE}
+# Take a table of <name,lcpm> pairs and determine type type.
+#
+calc.pam50.type.inner <- function(lcpms) {
+    y <- lcpms[, .(pam50.cor = cor(lcpm, weight, method="spearman")), by=.(type)]
+    type.level <- y[, which.max(pam50.cor)]
+    return(type.level)
+}
+
+# Take a table of <name,lcpm> pairs and determine type type.
+#
+calc.pam50.type <- function(lcpms) {
+    x0 <- lcpms
+    setkey(x0, 'name')
+    x0 <- merge(x0, pam50.long, by.x='name', by.y='gene')
+    t0 <- calc.pam50.type.inner(x0)
+    tps <- pam50.long[gene=='ERBB2', type]
+    tps[t0]
+}
+
+# Take a table of <name,lcpm> pairs and perturb it
+#
+add.noise <- function(lcpms, alpha) {
+    lcpms[, .(name, weight, type, lcpm = lcpm + runif(length(lcpm), -alpha, alpha))]
+}
+
+# Run multiple trials adding noise and return the fraction of results
+# that are consistent with the original lcpm values.
+#
+test.pam50 <- function(lcpms, alpha, n.reps) {
+    x0 <- lcpms
+    setkey(x0, 'name')
+    x0 <- merge(x0, pam50.long, by.x='name', by.y='gene')
+    t0 <- calc.pam50.type.inner(x0)
+    tps <- pam50.long[gene=='ERBB2', type]
+    res.tbl <- data.table(type=tps, count=rep(0, length(tps)))
+    for (i in (1:n.reps)) {
+        x <- add.noise(x0, alpha)
+        t <- calc.pam50.type.inner(x)
+        res.tbl[t, count := count + 1]
+    }
+    res.tbl[t0]$count / sum(res.tbl$count)
+}
+
+# Find the lowest noise level at which the consistency drops below 95%
+#
+find.noise.tolerance <- function(lcpms) {
+    max.lcpm <- max(lcpms$lcpm)
+
+    lo <- 0
+    hi <- max.lcpm
+    while (hi - lo > 0.05) {
+        mid <- (hi + lo) / 2.0
+        p <- test.pam50(lcpms, mid, 1000)
+        if (p < 0.95) {
+            hi = mid
+        } else {
+            lo = mid
+        }
+    }
+    return(lo)
+}
+
+pam50.wrapper <- function(lcpms, names) {
+    data.table(lcpm = lcpms, name = names)
+}
+lcpm.pam50 <- merge(lcpm.long, gene.names, by.x='ensembl.id', by.y='ensembl.id')[, .(patient.id, sample, name, lcpm)]
+setkey(lcpm.pam50, 'name')
+pam50.summary <- lcpm.pam50[, .(type = calc.pam50.type(pam50.wrapper(lcpm, name)),
+                                tolerance.95 = find.noise.tolerance(pam50.wrapper(lcpm, name)),
+                                consistency.1 = test.pam50(pam50.wrapper(lcpm, name), 1, 1000)), by=.(patient.id, sample)]
+```
+
+We have computed PAM50 types for all the samples.
+Along with the PAM50 type, we report two measures that give an indication
+of how reliable the computed type might be.  These two measures -
+*tolerance* and *consistency* - are complementary in some sense.
+
+Consistency is computed by performing repeated trials of adding a given
+level of noise to the lcpm data and computing the result, then calculating
+the proportion of results that agree with the result obtained without
+adding noise. Note that because lcpm has a logarithmic relationship
+to the original counts, adding noise corresponds to a multiplicative
+effect on the counts.  Accordingly, adding noise in the range +/- 1,
+corresponds to noise that scales the counts between half and double.
+
+Tolerance is computed as the minimum amount of noise that must be added
+to lcpm values to make the consistency drop below a given threshhold.
+It is computed by evaluating the consistency in a binary search.
+
+The table below shows the computed PAM50 types, along with the
+consistency at a lcpm noise level of +/- 1, and the noise tolerance for
+95% consistency.
+
+```{r, echo=FALSE}
+knitr::kable(pam50.summary[, .(patient.id, sample, type, consistency.1 = percentize(consistency.1), tolerance.95)], digits = 2) %>% collapse_rows(columns = 1, valign = "top")
+```
+
 ## Highly Expressed Genes
 
-There are a small number of genes with large counts. In order to compare them across samples,
-we perform top-quartile normalisation after discarding small counts (i.e. < 10), to yield counts per million (cpm)
+There are a small number of genes with large counts. In order to
+compare them across samples, we perform top-quartile normalisation after
+discarding small counts (i.e. < 10), to yield counts per million (cpm)
 
 ```{r, echo=FALSE, results='asis'}
 quant.summary <- counts.long[count >= 10,
@@ -149,7 +266,7 @@ for (pid in unique(quant.summary$patient.id)) {
 ```
 
 ```{r, echo=FALSE}
-cpm.long <- counts.long[, .(patient.id, sample, ensembl.id, cpm = count * quant.summary[sample==sample, scaling.factor])]
+cpm.long <- counts.long[, .(patient.id, sample, ensembl.id, cpm = (0.5 + count) * quant.summary[sample==sample, scaling.factor])]
 lcpm.long <- cpm.long[, .(patient.id, sample, ensembl.id, lcpm = log2(cpm))]
 
 ggplot(lcpm.long, aes(lcpm)) +
@@ -192,7 +309,7 @@ Taking the 50 genes with the greatest absolute variance, we see the following re
 
 
 ```{r, echo=FALSE, fig.align='center'}
-# Pull out the list of most highly expressed genes
+# Pull out the list of most highly variable genes
 #
 lcpm.of.interest <- lcpm.long[, .(lcpm = var(lcpm)), by=.(ensembl.id)]
 setkey(lcpm.of.interest, 'lcpm')
