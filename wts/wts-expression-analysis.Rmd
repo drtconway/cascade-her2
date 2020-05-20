@@ -12,19 +12,20 @@ header-includes:
 - \usepackage{colortbl}
 - \usepackage{pdflscape}
 - \usepackage{tabu}
+- \usepackage{subfig}
 - \usepackage{threeparttable}
 - \usepackage{threeparttablex}
 - \usepackage[normalem]{ulem}
 - \usepackage{makecell}
-- \usepackage{xcolor}
+geometry: margin=2cm
 output:
   html_document:
     toc: true
-  pdf_document:
+  pdf_document2:
     keep_tex: true
 ---
 
-# CASCADE HER2+ Gene Expression Analysis
+# Introduction
 
 The CASCADE project is a study across several cancer types, in which
 in addition to any samples taken at diagnosis and during treatment,
@@ -32,44 +33,72 @@ at death, a rapid autopsy is performed to sample metastatic leisions
 that may not be accessable otherwise. Among the various assays used, are
 whole genome sequencing (WGS), and whole transcriptome sequencing (WTS).
 
-Here we present the differential gene expression (DGE) analysis of the
-4 metastatic sites sampled from patient CAS0057, who was diagnosed with
-HER2+ breast cancer.
-
-## Preamble
-
-```{r, echo=FALSE}
+```{r, "preamble", echo=FALSE, results=FALSE, message=FALSE}
+# Display related libraries
+#
 library(data.table)
 library(ggplot2)
 library(scales)
+library(kableExtra)
+library(gridExtra)
+library(RColorBrewer)
+library(purrr)
+library(digest)
 
+# Analysis & annotation related libraries
+#
 library(EnsDb.Hsapiens.v75)
 library(edgeR)
-library(kableExtra)
+library(limma)
 
-gene.names <- select(EnsDb.Hsapiens.v75, keys=keys(EnsDb.Hsapiens.v75, keytype="GENEID"), keytype="GENEID", columns=c("GENEID", "GENENAME"))
-gene.names <- data.table(ensembl.id = gene.names$GENEID, name = gene.names$GENENAME)
-setkey(gene.names, 'ensembl.id')
-
+# A couple of functions for formatting tabular data
+#
 commaize <- label_comma()
 percentize <- label_percent()
 boldize <- function(v) { text_spec(v, bold=TRUE) }
 decimalize <- function(v) { sprintf("%2.2f", v) }
 
-pam50.matrix <- fread('pam50_centroids.txt', header=TRUE);
-pam50.long <- melt(pam50.matrix, id.vars='gene')[, .(gene, type = variable, weight = value)]
+# Load a mapping from Ensembl gene ID to HGNC symbol
+#
+gene.names <- select(EnsDb.Hsapiens.v75, keys=keys(EnsDb.Hsapiens.v75, keytype="GENEID"), keytype="GENEID", columns=c("GENEID", "GENENAME"))
+gene.names <- data.table(ensembl.id = gene.names$GENEID, name = gene.names$GENENAME)
+setkey(gene.names, 'ensembl.id')
 
+# Load the PAM50 weights
+# (note - we have to rename some of them because they're not canonical)
+#
+pam50.matrix <- fread('pam50_centroids.txt', header=TRUE);
+pam50.matrix[, gene := mapply(alias2Symbol, gene)]
+pam50.long <- melt(pam50.matrix, id.vars='gene')[, .(gene, type = variable, weight = value)]
+setkey(pam50.long, "gene")
+
+# Load the data table-of-contents
+#
 samples.toc <- fread('data/samples-toc.tsv', header=TRUE)
 samples.toc[WGS.project == "NA",    WGS.project := NA]
 samples.toc[WTS.project == "NA",    WTS.project := NA]
 samples.toc[vcf.file == "NA",       vcf.file := NA]
 samples.toc[counts.file == "NA",    counts.file := NA]
+samples.toc[, sample := paste0(patient.id, ".", sample.id)]
+samples.toc[, sample := factor(sample)]
 
+# Load the read counts - this is just from the FASTQ files
+#
 read.counts <- fread('data/read-counts.txt', header=TRUE)
 setkey(read.counts, 'project')
+
+# Load a table with the sequence run information
+#
+seqrun.table <- fread("data/seqrun-data.tsv", header=TRUE)
+sample.seqruns <- merge(samples.toc, seqrun.table, by.x="WTS.project", by.y="project.id")[, .(patient.id, sample, seqrun)]
+sample.srhash <- sample.seqruns[, .(hash = substr(digest(seqrun, "sha256"), 1, 8), seqruns = paste(seqrun, collapse=" ")), by=.(patient.id, sample)]
+sample.srhash[, hash := factor(hash)]
+setkey(sample.srhash, "sample")
+srhash.summary <- sample.srhash
+setkeyv(srhash.summary, c('hash', 'seqruns', 'patient.id'))
 ```
 
-```{r, echo=FALSE}
+```{r, "load-counts-data", echo=FALSE}
 counts.wide.all <- data.table()
 
 load.counts <- function(fn, pid, sid) {
@@ -95,21 +124,21 @@ counts.long <- counts.long.all[grepl("^ENS", ensembl.id)]
 
 ## Basic data summary
 
-The following samples underwent Whole Transcriptome Sequencing (WTS):
+The table below shows the basic summary of the sequencing data from the whole transcriptome sequencing experiments.
 
-```{r, echo=FALSE}
+```{r, "data-summary", echo=FALSE, longtable=TRUE}
 x <- samples.toc
 setkey(x, 'WTS.project')
 x <- merge(x, read.counts, by.x='WTS.project', by.y='project')
 setkeyv(x, c('patient.id', 'sample.id'))
-knitr::kable(x[!is.na(WTS.project), .(patient.id, sample.id, WTS.project, read.count = commaize(read.count), sample.site)],
-             caption="Data Summary")
+knitr::kable(x[!is.na(WTS.project), .(patient.id, sample.id, WTS.project, read.count = commaize(read.count), sample.site)]) %>%
+        collapse_rows(columns = 1, valign = "top")
 ```
 
-The reader were aligned to hg19 with STAR, using Homo\_sapiens.GRCh37.87.gtf.
-Using `htseq-count` to count the number of reads per gene, we get the following raw counts:
+The reads were aligned to hg19 with STAR, using Homo\_sapiens.GRCh37.87.gtf.
+Using `htseq-count` to count the number of reads per gene, summarised in Table below.
 
-```{r, echo=FALSE, results='asis'}
+```{r, echo=FALSE, longtable=TRUE}
 alignment.summary <- counts.long.all[,
     .(fragments = sum(count),
       good.count = sum(grepl("^ENS", ensembl.id) * count),
@@ -119,26 +148,43 @@ alignment.summary <- counts.long.all[,
       non.unique = sum((ensembl.id == "__alignment_not_unique") * count)/sum(count)),
     by=.(patient.id, sample)]
 
-for (pid in unique(alignment.summary$patient.id)) {
-    print(knitr::kable(alignment.summary[patient.id == pid,
-        .(sample,
-          fragments = commaize(fragments),
-          good.count = commaize(good.count),
-          good.frac = percentize(good.frac),
-          no.feature = percentize(no.feature),
-          ambiguous = percentize(ambiguous),
-          non.unique = percentize(non.unique)
-        )], caption=paste0(pid, " alignment summary")))
-}
+knitr::kable(alignment.summary[,
+            .(sample,
+              fragments = commaize(fragments),
+              good.count = commaize(good.count),
+              good.frac = percentize(good.frac),
+              no.feature = percentize(no.feature),
+              ambiguous = percentize(ambiguous),
+              non.unique = percentize(non.unique)), by=.(patient.id)]) %>%
+        collapse_rows(columns = 1, valign = "top")
 ```
 
-The raw counts have the following distribution:
+The density of the log2 counts are summarised in following plots.
 
-```{r, echo=FALSE}
-ggplot(counts.long[count > 1], aes(log2(count))) +
-    geom_density(aes(group=sample, fill=sample), alpha=0.25) +
-    theme_minimal() +
-    facet_wrap(~patient.id)
+```{r, counts-density-plots, fig.width=7, echo=FALSE}
+raw_count_density <- function(pid, dt) {
+    print(ggplot(dt, aes(log2(count))) +
+            geom_density(aes(group=sample, colour=sample), alpha=0.25) +
+            labs(x="raw log2 counts per gene", title=paste0(pid, " log2 count density, excluding zeros")) +
+            theme_minimal() +
+            theme(legend.position = "bottom"))
+    NA
+}
+unused <- counts.long[count > 0, raw_count_density(patient.id, .SD), by=.(patient.id)]
+```
+
+## Data massage for edgeR analysis.
+
+```{r, "edgeR-data-organisation", echo=TRUE, tidy=TRUE}
+sample.groups = factor(counts.long[, 1, by=.(patient.id, sample)]$patient.id)
+sample.labels = factor(counts.long[, 1, by=.(patient.id, sample)]$sample)
+sample.colours = sample.groups
+levels(sample.colours) <- brewer.pal(nlevels(sample.colours), "Set1")
+sample.lanes = sprintf("L%03d", (1:length(sample.groups)))
+lcpm.matrix <- dcast(counts.long, ensembl.id ~ sample, value.var = 'count')
+lcpm.tbl <- DGEList(lcpm.matrix[, 2:(length(unique(counts.long$sample))+1)], genes=lcpm.matrix$ensembl.id)
+lcpm.tbl$samples$lanes <- sample.lanes
+lcpm.dt <- data.table(cpm(lcpm.tbl, log=TRUE))
 ```
 
 ## PAM50 Classification
@@ -148,7 +194,7 @@ https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6547580/ using the lcpm
 values. The usual method was evaluated: using the Spearman's rank
 correlation between the lcpm values and the centroid values.
 
-```{r, echo=FALSE, cache=TRUE}
+```{r, "pam50-calculations", echo=FALSE}
 # Take a table of <name,lcpm> pairs and determine type type.
 #
 calc.pam50.type.inner <- function(lcpms) {
@@ -194,14 +240,14 @@ test.pam50 <- function(lcpms, alpha, n.reps) {
 
 # Find the lowest noise level at which the consistency drops below 95%
 #
-find.noise.tolerance <- function(lcpms) {
+find.noise.tolerance <- function(lcpms, n.reps) {
     max.lcpm <- max(lcpms$lcpm)
 
     lo <- 0
     hi <- max.lcpm
-    while (hi - lo > 0.05) {
+    while (hi - lo > 0.01) {
         mid <- (hi + lo) / 2.0
-        p <- test.pam50(lcpms, mid, 1000)
+        p <- test.pam50(lcpms, mid, n.reps)
         if (p < 0.95) {
             hi = mid
         } else {
@@ -211,14 +257,16 @@ find.noise.tolerance <- function(lcpms) {
     return(lo)
 }
 
-pam50.wrapper <- function(lcpms, names) {
-    data.table(lcpm = lcpms, name = names)
-}
-lcpm.pam50 <- merge(lcpm.long, gene.names, by.x='ensembl.id', by.y='ensembl.id')[, .(patient.id, sample, name, lcpm)]
+lcpm.pam50 <- merge(counts.long, gene.names, by.x='ensembl.id', by.y='ensembl.id')
+lcpm.pam50[, lcpm := log2(count + 0.5)]
+setkey(lcpm.pam50, "name")
+lcpm.pam50 <- lcpm.pam50[name %in% unique(pam50.long$gene)]
 setkey(lcpm.pam50, 'name')
-pam50.summary <- lcpm.pam50[, .(type = calc.pam50.type(pam50.wrapper(lcpm, name)),
-                                tolerance.95 = find.noise.tolerance(pam50.wrapper(lcpm, name)),
-                                consistency.1 = test.pam50(pam50.wrapper(lcpm, name), 1, 1000)), by=.(patient.id, sample)]
+set.seed(19)
+n.reps <- 10
+pam50.summary <- lcpm.pam50[, .(type = calc.pam50.type(.SD[, .(lcpm, name)]),
+                                tolerance.95 = find.noise.tolerance(.SD[, .(lcpm, name)], n.reps),
+                                consistency.1 = test.pam50(.SD[, .(lcpm, name)], 1, n.reps)), by=.(patient.id, sample)]
 ```
 
 We have computed PAM50 types for all the samples.
@@ -242,42 +290,93 @@ The table below shows the computed PAM50 types, along with the
 consistency at a lcpm noise level of +/- 1, and the noise tolerance for
 95% consistency.
 
-```{r, echo=FALSE}
-knitr::kable(pam50.summary[, .(patient.id, sample, type, consistency.1 = percentize(consistency.1), tolerance.95)], digits = 2) %>% collapse_rows(columns = 1, valign = "top")
+```{r, echo=FALSE, longtable=TRUE}
+knitr::kable(pam50.summary[, .(patient.id,
+                               sample = gsub("CAS00[0-9]*[.]", "", sample),
+                               type,
+                               "consistency@1" = percentize(consistency.1),
+                               "tolerance@95" = tolerance.95)], digits = 2, align = "ccccc") %>%
+                collapse_rows(columns = 1, valign = "top")
+```
+
+## Log Count Normalisation
+
+Counts are filtered to remove low level counts that are not statistically useful,
+and normalisation factors are computed to compensate for differing library sizes.
+
+```{r, "log-count-norm"}
+L <- mean(lcpm.tbl$samples$lib.size) * 1e-6
+M <- median(lcpm.tbl$samples$lib.size) * 1e-6
+keep.exprs <- filterByExpr(lcpm.tbl, group=sample.groups)
+lcpm.tbl <- lcpm.tbl[keep.exprs,, keep.lib.sizes=FALSE]
+lcpm.cutoff <- log2(10/M + 2/L)
+lcpm.tbl <- calcNormFactors(lcpm.tbl, method = "TMM")
+lcpm.dt <- data.table(cpm(lcpm.tbl, log=TRUE))
+lcpm.dt[, ensembl.id := lcpm.tbl$genes]
+lcpm.dt <- merge(lcpm.dt, gene.names, by.x='ensembl.id', by.y='ensembl.id')
+lcpm.long <- melt(lcpm.dt, id.vars=c("ensembl.id", "name"), variable.name="sample", value.name="lcpm")
+lcpm.long[, patient.id := gsub("[.].*", "", sample)]
+pids <- lcpm.long[, unique(patient.id)]
+```
+
+The following plots show the normalised and filtered lcpm density.
+
+```{r, lcpm-density-plots, fig.width=7, echo=FALSE}
+lcpm_count_density <- function(pid, dt) {
+    print(ggplot(dt, aes(lcpm)) +
+            geom_density(aes(group=sample, colour=sample), alpha=0.25) +
+            labs(x="normalised lcpm", title=paste0(pid, " lcpm density")) +
+            theme_minimal() +
+            theme(legend.position = "bottom"))
+    NA
+}
+unused <- lcpm.long[, lcpm_count_density(patient.id, .SD), by=.(patient.id)]
+```
+
+## MDS Analysis
+
+```{r, echo=FALSE, fig.height=10}
+lcpm.dt <- data.table(cpm(lcpm.tbl, log=TRUE))
+par(mfrow=c(2,1))
+plotMDS(lcpm.dt, labels=gsub("CAS00[0-9]*[.]", "", sample.labels), col=as.character(sample.colours), cex=0.707, main="Colour by Patient")
+legend("topleft", legend=levels(sample.groups), col=levels(sample.colours), pch=16, cex=0.707)
+plotMDS(lcpm.dt, labels=gsub("CAS00[0-9]*[.]", "", sample.labels), col=as.character(sample.colours), cex=0.707, dim=c(3,4))
+legend("topleft", legend=levels(sample.groups), col=levels(sample.colours), pch=16, cex=0.707)
+```
+
+```{r, echo=FALSE, fig.height=10}
+type.colours = pam50.summary$type
+levels(type.colours) <- brewer.pal(nlevels(type.colours), "Set1")
+par(mfrow=c(2,1))
+plotMDS(lcpm.dt, labels=gsub("CAS00", "", sample.labels), col=as.character(type.colours), cex=0.707, main="Colour by PAM50 type")
+legend("topleft", legend=levels(pam50.summary$type), col=levels(type.colours), pch=16, cex=0.707)
+plotMDS(lcpm.dt, labels=gsub("CAS00", "", sample.labels), col=as.character(type.colours), cex=0.707, dim=c(3,4))
+legend("topleft", legend=levels(pam50.summary$type), col=levels(type.colours), pch=16, cex=0.707)
+```
+
+```{r, echo=FALSE, fig.height=10}
+hash.colours = sample.srhash$hash
+levels(hash.colours) <- brewer.pal(nlevels(hash.colours), "Set1")
+par(mfrow=c(2,1))
+plotMDS(lcpm.dt, labels=gsub("CAS00", "", sample.labels), col=as.character(hash.colours), cex=0.707, main="Colour by Sequence Run")
+legend("topleft", legend=levels(sample.srhash$hash), col=levels(hash.colours), pch=16, cex=0.707)
+plotMDS(lcpm.dt, labels=gsub("CAS00", "", sample.labels), col=as.character(hash.colours), cex=0.707, dim=c(3,4))
+legend("topleft", legend=levels(sample.srhash$hash), col=levels(hash.colours), pch=16, cex=0.707)
+```
+
+Note that the hashes correspond to (combinations of) sequence runs in the following manner:
+
+```{r, echo=FALSE, booktable=TRUE, longtable=TRUE}
+knitr::kable(srhash.summary[, .(hash, seqruns, sample)]) %>%
+    column_spec(2, width = "18em") %>%
+    collapse_rows(columns = c(1, 2), valign = "top")
 ```
 
 ## Highly Expressed Genes
 
-There are a small number of genes with large counts. In order to
-compare them across samples, we perform top-quartile normalisation after
-discarding small counts (i.e. < 10), to yield counts per million (cpm)
-
-```{r, echo=FALSE, results='asis'}
-quant.summary <- counts.long[count >= 10,
-    .(q25 = quantile(count, 0.25),
-      q50 = quantile(count, 0.5),
-      q75 = quantile(count, 0.75),
-      sum.q75 = sum(count * (count > quantile(count, 0.75)))),
-    by=.(patient.id, sample)]
-quant.summary[, scaling.factor := 1e6/sum.q75]
-for (pid in unique(quant.summary$patient.id)) {
-    print(knitr::kable(quant.summary[patient.id == pid, .(sample, q25, q50, q75, sum.q75, scaling.factor)], caption=pid))
-}
-```
-
-```{r, echo=FALSE}
-cpm.long <- counts.long[, .(patient.id, sample, ensembl.id, cpm = (0.5 + count) * quant.summary[sample==sample, scaling.factor])]
-lcpm.long <- cpm.long[, .(patient.id, sample, ensembl.id, lcpm = log2(cpm))]
-
-ggplot(lcpm.long, aes(lcpm)) +
-    geom_density(aes(group=sample, fill=sample), alpha=0.25) +
-    theme_minimal() +
-    facet_wrap(~patient.id)
-```
-
 Taking the most expressed 50 genes, we see the following relative expression across the different samples for each patient.
 
-```{r, echo=FALSE, fig.align='center'}
+```{r, echo=FALSE, fig.width=7, fig.align='center'}
 # Pull out the list of most highly expressed genes
 #
 lcpm.of.interest <- lcpm.long[, .(lcpm = max(lcpm)), by=.(ensembl.id)]
@@ -288,7 +387,6 @@ high.genes = tail(lcpm.of.interest, 50)$ensembl.id
 #
 hgdt <- lcpm.long[ensembl.id %in% high.genes]
 setkey(hgdt, 'ensembl.id')
-hgdt <- merge(hgdt, gene.names, by.x='ensembl.id', by.y='ensembl.id')
 
 # Order them by mean lcpm.
 #
@@ -296,42 +394,13 @@ hg.order <- hgdt[, .(lcpm.mean = sum(lcpm)/length(lcpm)), by=.(name)]
 setkey(hg.order, 'lcpm.mean')
 hgdt[, name := factor(name, levels=hg.order$name)]
 
-for (pid in unique(hgdt$patient.id)) {
-    print(ggplot(hgdt[patient.id==pid], aes(name, lcpm, colour=sample)) +
+highly_expressed_genes <- function(pid, dt) {
+    print(ggplot(dt, aes(name, lcpm, colour=sample)) +
                 geom_point() +
-                labs(x='gene', y='lcpm', colour='sample', title=pid) +
+                labs(x='gene', y='lcpm', colour='sample', title=paste0(pid, " expression levels for highly expressed genes in")) +
                 theme_minimal() +
                 theme(axis.text.x = element_text(size = 7, angle = 90, hjust = 1), legend.position = "bottom"))
+    NA
 }
-```
-
-Taking the 50 genes with the greatest absolute variance, we see the following relative expression across the different samples for each patient.
-
-
-```{r, echo=FALSE, fig.align='center'}
-# Pull out the list of most highly variable genes
-#
-lcpm.of.interest <- lcpm.long[, .(lcpm = var(lcpm)), by=.(ensembl.id)]
-setkey(lcpm.of.interest, 'lcpm')
-high.genes = tail(lcpm.of.interest, 50)$ensembl.id
-
-# Use them to extract a subset of the data
-#
-hgdt <- lcpm.long[ensembl.id %in% high.genes]
-setkey(hgdt, 'ensembl.id')
-hgdt <- merge(hgdt, gene.names, by.x='ensembl.id', by.y='ensembl.id')
-
-# Order them by mean lcpm.
-#
-hg.order <- hgdt[, .(lcpm.var = var(lcpm)), by=.(name)]
-setkey(hg.order, 'lcpm.var')
-hgdt[, name := factor(name, levels=hg.order$name)]
-
-for (pid in unique(hgdt$patient.id)) {
-    print(ggplot(hgdt[patient.id==pid], aes(name, lcpm, colour=sample)) +
-                geom_point() +
-                labs(x='gene', y='lcpm', colour='sample', title=pid) +
-                theme_minimal() +
-                theme(axis.text.x = element_text(size = 7, angle = 90, hjust = 1), legend.position = "bottom"))
-}
+unused <- hgdt[, highly_expressed_genes(patient.id, .SD), by=.(patient.id)]
 ```
