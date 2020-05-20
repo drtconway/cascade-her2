@@ -404,3 +404,17 @@ highly_expressed_genes <- function(pid, dt) {
 }
 unused <- hgdt[, highly_expressed_genes(patient.id, .SD), by=.(patient.id)]
 ```
+## HER2 (ERBB2) Gene Expression
+
+The following plot shows the expression level of HER2 for each sample. For reference, the median and maximum expression over the PAM50 set is also shown.
+
+```{r, echo=FALSE}
+her2.summary <- lcpm.long[name %in% pam50.matrix$gene, .(maximum = max(lcpm), med = median(lcpm), her2 = sum((name=="ERBB2")*lcpm)), by=.(patient.id, sample)]
+ggplot(her2.summary, aes(sample, her2, fill=patient.id)) +
+            geom_bar(stat="identity") +
+            geom_point(aes(sample, med, shape='median'), colour="black") +
+            geom_point(aes(sample, maximum, shape='maximum'), colour="black") +
+            labs(x='sample', y='lcpm', colour='Patient') +
+            theme_minimal() +
+            theme(axis.text.x = element_text(size = 7, angle = 90, hjust = 1))
+```
