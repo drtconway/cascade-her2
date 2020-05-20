@@ -397,7 +397,7 @@ hgdt[, name := factor(name, levels=hg.order$name)]
 highly_expressed_genes <- function(pid, dt) {
     print(ggplot(dt, aes(name, lcpm, colour=sample)) +
                 geom_point() +
-                labs(x='gene', y='lcpm', colour='sample', title=paste0(pid, " expression levels for highly expressed genes in")) +
+                labs(x='gene', y='lcpm', colour='sample', title=paste0(pid, " highly expressed genes")) +
                 theme_minimal() +
                 theme(axis.text.x = element_text(size = 7, angle = 90, hjust = 1), legend.position = "bottom"))
     NA
@@ -408,13 +408,25 @@ unused <- hgdt[, highly_expressed_genes(patient.id, .SD), by=.(patient.id)]
 
 The following plot shows the expression level of HER2 for each sample. For reference, the median and maximum expression over the PAM50 set is also shown.
 
-```{r, echo=FALSE}
+```{r, echo=FALSE, out.height="4in", fig.align="center"}
 her2.summary <- lcpm.long[name %in% pam50.matrix$gene, .(maximum = max(lcpm), med = median(lcpm), her2 = sum((name=="ERBB2")*lcpm)), by=.(patient.id, sample)]
 ggplot(her2.summary, aes(sample, her2, fill=patient.id)) +
             geom_bar(stat="identity") +
             geom_point(aes(sample, med, shape='median'), colour="black") +
             geom_point(aes(sample, maximum, shape='maximum'), colour="black") +
-            labs(x='sample', y='lcpm', colour='Patient') +
+            labs(x='sample', y='lcpm', fill='Patient', shape="PAM50") +
+            theme_minimal() +
+            theme(axis.text.x = element_text(size = 7, angle = 90, hjust = 1))
+```
+
+This is the same data showing the expression as a fold-change compared to the median expression over the PAM50 genes.
+
+```{r, echo=FALSE, out.height="4in", fig.align="center"}
+her2.summary <- lcpm.long[name %in% pam50.matrix$gene, .(maximum = max(lcpm), med = median(lcpm), her2 = sum((name=="ERBB2")*lcpm)), by=.(patient.id, sample)]
+ggplot(her2.summary, aes(sample, her2 - med, fill=patient.id)) +
+            geom_bar(stat="identity") +
+            geom_point(aes(sample, maximum - med, shape='maximum'), colour="black") +
+            labs(x='sample', y='lcpm relative to median', fill='Patient', shape="PAM50") +
             theme_minimal() +
             theme(axis.text.x = element_text(size = 7, angle = 90, hjust = 1))
 ```
